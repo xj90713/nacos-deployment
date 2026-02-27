@@ -1,0 +1,92 @@
+failure:
+  stage: notify
+  script: |
+    # set -ex
+    TAG=${TAG1:-"$TAG2"}
+    
+    # 添加错误处理和调试信息
+    echo "正在获取变更文件..."
+    echo "当前 commit: $CI_COMMIT_SHA"
+    echo "之前 commit: $CI_COMMIT_BEFORE_SHA"
+    
+    # 根据分支设置环境目录
+    if [ "$CI_COMMIT_REF_NAME" = "master" ]; then
+      ENV_DIR="prod"
+    elif [ "$CI_COMMIT_REF_NAME" = "release" ]; then
+      ENV_DIR="uat|test"
+    fi
+        
+
+    # 修改命令添加错误处理
+    CHANGED_FILES=""
+    if git diff --name-only $CI_COMMIT_BEFORE_SHA $CI_COMMIT_SHA > /dev/null 2>&1; then
+      CHANGED_FILES=$(git diff --name-only  $CI_COMMIT_BEFORE_SHA $CI_COMMIT_SHA | grep -E '\.ya?ml$' || true)
+      if [ -n "$CHANGED_FILES" ]; then
+        CHANGED_FILES=$(echo "$CHANGED_FILES" | sed ':a;N;$!ba;s/\n/\\n/g')
+      fi
+    fi
+
+    # 根据CHANGED_FILES是否为空设置不同的内容
+    if [ -n "$CHANGED_FILES" ]; then
+      content="项目 ${CI_PROJECT_NAMESPACE}/${CI_PROJECT_NAME} 验证文件格式失败: \n ${CHANGED_FILES} , 点击 [这里](${CI_PIPELINE_URL}) 查看详情"
+    else
+      content="项目 ${CI_PROJECT_NAMESPACE}/${CI_PROJECT_NAME} 执行失败，没有按要求提交配置，点击 [这里](${CI_PIPELINE_URL}) 查看详情"
+    fi
+
+    if [ -z "$TAG1" ];then
+      msg="<font color='red'>**【项目发布失败】**</font>\n ${content}"
+      curl -H "Content-Type: application/json" -d "{\"msgtype\": \"markdown\",\"markdown\": {\"content\":\"${msg}\"}}" ${ALERT_URL}${WEIXIN_KEY}
+      exit 0
+    fi
+    msg="<font color='red'>**【项目发布失败】**</font>\n ${content}"
+    curl -H "Content-Type: application/json" -d "{\"msgtype\": \"markdown\",\"markdown\": {\"content\":\"${msg}\"}}" ${ALERT_URL}${WEIXIN_KEY}
+  when: on_failure
+  rules:
+    - changes:
+        - "**/*.yml"
+        - "**/*.yaml"
+  tags:
+    - host
+
+success:
+  stage: notify
+  script: |
+    # set -ex
+    TAG=${TAG1:-"$TAG2"}
+    
+    # 根据分支设置环境目录
+    if [ "$CI_COMMIT_REF_NAME" = "master" ]; then
+      ENV_DIR="/prod/.*ya?ml$"
+    elif [ "$CI_COMMIT_REF_NAME" = "release" ]; then
+      ENV_DIR="/(uat|test)/.*ya?ml$"
+    fi
+
+    # 修改命令添加错误处理
+    CHANGED_FILES=""
+    if git diff --name-only  $CI_COMMIT_BEFORE_SHA $CI_COMMIT_SHA > /dev/null 2>&1; then
+      CHANGED_FILES=$(git diff --name-only $CI_COMMIT_BEFORE_SHA $CI_COMMIT_SHA | grep -E $ENV_DIR || true)
+      if [ -n "$CHANGED_FILES" ]; then
+        CHANGED_FILES=$(echo "$CHANGED_FILES" | sed ':a;N;$!ba;s/\n/\\n/g')
+      fi
+    fi
+    
+    # 根据CHANGED_FILES是否为空设置不同的内容
+    if [ -n "$CHANGED_FILES" ]; then
+      content="项目 ${CI_PROJECT_NAMESPACE}/${CI_PROJECT_NAME} 发布配置文件文件：\n ${CHANGED_FILES}"
+    else
+      content="项目 ${CI_PROJECT_NAMESPACE}/${CI_PROJECT_NAME} 执行成功"
+    fi
+
+    if [ -z "$TAG1" ];then
+      msg="<font color='info'>**【项目发布成功】**</font>\n ${content}"
+      curl -H "Content-Type: application/json" -d "{\"msgtype\": \"markdown\",\"markdown\": {\"content\":\"${msg}\"}}" ${ALERT_URL}${WEIXIN_KEY}
+      exit 0
+    fi
+    msg="<font color='info'>**【项目发布成功】**</font>\n ${content}"
+    curl -H "Content-Type: application/json" -d "{\"msgtype\": \"markdown\",\"markdown\": {\"content\":\"${msg}\"}}" ${ALERT_URL}${WEIXIN_KEY}
+  when: on_success
+  only:
+    - master
+    - release
+  tags:
+    - host

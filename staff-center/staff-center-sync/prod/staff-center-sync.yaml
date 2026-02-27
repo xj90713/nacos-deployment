@@ -1,0 +1,79 @@
+server:
+  port: 8080
+spring:
+  mvc:
+    pathmatch:
+      matching-strategy: ANT_PATH_MATCHER
+  datasource:
+    druid:
+      web-stat-filter:
+        enabled: true
+      stat-view-servlet:
+        enabled: true
+        allow:
+        url-pattern: /druid/*
+        login-username: admin
+        login-password: admin123
+      filter:
+        stat:
+          enabled: true
+          log-slow-sql: true
+          slow-sql-millis: 1000
+          merge-sql: true
+        wall:
+          config:
+            multi-statement-allow: true
+    dynamic:
+      druid:
+        initial-size: 1
+        min-idle: 1
+        max-active: 20
+        max-wait: 600000
+        time-between-eviction-runs-millis: 60000
+        min-evictable-idle-time-millis: 300000
+        max-evictable-idle-time-millis: 900000
+        #validation-query: SELECT 1 FROM DUAL
+        test-while-idle: true
+        test-on-borrow: false
+        test-on-return: false
+      primary: master
+      datasource:
+        master:
+          url: jdbc:mysql://127.0.0.1:3306/staff_center?useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&nullCatalogMeansCurrent=true
+          username: staff_center
+          password: ${SPRING_DATASOURCE_DYNAMIC_DATASOURCE_MASTER_PASSWORD}
+  redis:
+    host: redis.staff-center.svc.cluster.local
+    port: 6379
+    password: ${SPRING_REDIS_PASSWORD}
+    # 数据库索引
+    database: 1
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+    shrink-whitespaces-in-sql: true
+    log-impl: org.apache.ibatis.logging.nologging.NoLoggingImpl
+  global-config:
+    banner: false
+
+swagger:
+  enable: false
+
+logging:
+  level:
+    com.gushi.staff.center.sync.dao: debug
+    
+# 配置定时任务
+xxl:
+  job:
+    admin:
+      addresses: http://xxl-job.grp-arch:8080/xxl-job-admin 
+    executor:
+      appname: staff-center-job-executor
+      address:
+      ip:
+      # 此端口不同项目不能相同
+      port: 8003
+      logpath: ./logs/job/staff-center-sync
+      logretentiondays: 30

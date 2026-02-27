@@ -1,0 +1,178 @@
+stages:
+  - verify
+  - deploy
+  - notify
+
+.verify-yaml: &verify-yaml
+  script:
+    - |
+      # set -ex
+      echo "开始全分支YAML格式校验..."
+      failed_files=""
+      for file in $(git diff --name-only $CI_COMMIT_BEFORE_SHA $CI_COMMIT_SHA); do
+        if [[ $file =~ \.ya?ml$ ]]; then
+          echo "正在验证文件: $file"
+          yamllint_output=$(yamllint --no-warnings -d "{ extends: default,rules: {line-length: disable, new-line-at-end-of-file: disable,trailing-spaces: disable}}" "$file" 2>&1 || true)
+          if echo "$yamllint_output" | grep -q "error"; then
+            echo "❌ $file 验证失败"
+            echo "$yamllint_output"
+            failed_files="$failed_files $file:\n$yamllint_output"
+          else
+            echo "✅ $file 验证通过"
+          fi
+        fi
+      done
+      if [ ! -z "$failed_files" ]; then
+        echo "----------------------------------------"
+        echo "❌ 以下文件YAML格式验证失败："
+        echo "$failed_files"
+        echo "----------------------------------------"
+        exit 1
+      fi
+  tags:
+    - host
+
+verify-yaml:
+  <<: *verify-yaml
+  stage: verify
+  rules:
+    - if: '$CI_COMMIT_REF_NAME == "master" || $CI_COMMIT_REF_NAME == "release"'
+      when: never
+    - changes:
+        - "**/*.yml"
+        - "**/*.yaml"
+
+.deploy-nacos: &deploy-nacos
+  script:
+    - |
+      # set -ex
+      # 初始化变量来存储文件列表
+      failed_files=""
+      valid_files=""
+      deploy_failed_files=""
+      if [[ "$CI_COMMIT_BRANCH" == "release" ]]; then
+        env="test"
+        file_pattern=".*(test|uat)/.+\.ya?ml$"
+      elif [[ "$CI_COMMIT_BRANCH" == "master" ]]; then
+        env="prod"
+        file_pattern=".*/prod/.+\.ya?ml$"
+      else
+        echo "不支持的分支: $CI_COMMIT_BRANCH"
+        exit 1
+      fi
+      get_nacos_config() {
+        local service_name="$1"
+        # local info_file="business/business-listener/uat/.info"
+        
+        curl -sS -k -o info_file --header "PRIVATE-TOKEN:glpat-xN_SZi-EdssJxEBPw6pP"  "https://gitlab.gp51.com/api/v4/projects/10/repository/files/nacos-config%2Fnacos-${env}.txt/raw?ref=main"
+        grep -v '^#' info_file | grep -E "^$service_name\|" | head -n1
+      }
+      echo "开始验证YAML文件..."
+      # 首先验证所有文件
+      for file in $(git diff --name-only $CI_COMMIT_BEFORE_SHA $CI_COMMIT_SHA); do
+        # if [[ $file =~ .*/test/.*\.ya?ml$ || $file =~ .*/uat/.*\.ya?ml$ ]]; then
+        if [[ $file =~ $file_pattern ]]; then
+          # 从文件路径获取项目名
+          project_name=$(echo "$file" | cut -d'/' -f2)
+          echo "处理项目: $project_name"
+                    
+          echo "正在验证文件: $file"
+          yamllint_output=$(yamllint --no-warnings -d "{ extends: default,rules: {line-length: disable, new-line-at-end-of-file: disable,trailing-spaces: disable}}" "$file" 2>&1 || true)
+          #yamllint --no-warnings -d "{ extends: default,rules: {line-length: disable, new-line-at-end-of-file: disable,trailing-spaces: disable}}" "$file" || true
+          # yamllint_status=$?
+          # 检查输出中是否包含error关键字
+          if echo "$yamllint_output" | grep -q "error"; then
+            echo "❌ $file 验证失败"
+            echo "$yamllint_output"
+            failed_files="$failed_files $file:\n$yamllint_output"
+          else
+            echo "✅ $file 验证通过"
+            valid_files="$valid_files $file"
+          fi
+        fi
+      done
+      
+      for file in $valid_files; do
+        project_name=$(echo "$file" | cut -d'/' -f2)
+        nacos_line=$(get_nacos_config "$project_name")
+        # 首先检查是否包含 ${} 字符
+        if [[ "$CI_COMMIT_BRANCH" == "master" ]]; then
+          if grep -q '\${[A-Z_][A-Z0-9_]*}' "$file"; then
+            echo "✅ $file 包含未解析的变量 \${}"
+            echo "$(grep -n '\${[A-Z_][A-Z0-9_]*}' "$file")"
+            group_name=$(echo "$file" | cut -d'/' -f1)
+            app_name=$(echo "$file" | cut -d'/' -f4 | cut -d'.' -f1)
+            dir_app_name=$(echo "$file"| cut -d'.' -f1)
+            # 修改token,这部分主要是把一些敏感信息放在一个单独gitlab仓库中，，然后通过环境变量替换到配置文件，避免直接暴露在仓库中
+            curl -sS -k -o env.sh --header "PRIVATE-TOKEN:${token}"  "https://gitlab.gp51.com/api/v4/projects/10/repository/files/nacos-config%2F${group_name}%2F${project_name}%2F${app_name}.sh/raw?ref=main"
+            source env.sh
+            var=$(cat env.sh|awk -F ' ' '{print $2}'|awk -F '=' '{print $1}'|awk '{print "${" $1 "}"}')
+            envsubst "$var" <$file >${dir_app_name}-tmp.yaml
+            mv ${dir_app_name}-tmp.yaml $file
+          fi
+        fi
+        set -- $(echo "$nacos_line" | awk -F'|' '{for(i=1;i<=NF;i++) printf "%s ", $i; print ""}')
+        s_name=$1
+        NACOS_ADDR=$2
+        NACOS_NS_ID=$3
+        NACOS_NS_GROUP=$4
+        NACOS_USERNAME=$5
+        NACOS_PASSWORD=$6
+        NACOS_PORT=$7
+        NACOS_SCHEMA=$8
+        stk_output=$(python3 update_nacos.py \
+          --nacos-addr $NACOS_ADDR \
+          --nacos-addr-scheme $NACOS_SCHEMA \
+          --nacos-port $NACOS_PORT \
+          --nacos-ns-id $NACOS_NS_ID \
+          --nacos-ns-group $NACOS_NS_GROUP \
+          --nacos-username $NACOS_USERNAME \
+          --nacos-passwd $NACOS_PASSWORD \
+          --nacos-filename-list $file || true)
+        # 根据输出内容判断部署结果
+        if echo "$stk_output" | grep -q "successfully"; then
+          echo "✅ $file 部署成功"
+          echo "$stk_output"
+        else
+          echo "❌ $file 部署失败"
+          echo "$stk_output"
+          deploy_failed_files="$deploy_failed_files $file:\n$stk_output"
+        fi
+      done    
+      
+      # 如果有验证失败或部署失败的文件，打印并退出
+      if [ ! -z "$failed_files" ] || [ ! -z "$deploy_failed_files" ]; then
+        echo "----------------------------------------"
+        if [ ! -z "$failed_files" ]; then
+          echo "❌ 以下文件YAML格式验证失败："
+          echo "$failed_files"
+        fi
+        if [ ! -z "$deploy_failed_files" ]; then
+          echo "❌ 以下文件部署失败："
+          echo "$deploy_failed_files"
+        fi
+        echo "----------------------------------------"
+        exit 1
+      fi
+  tags:
+    - host
+    
+deploy-release:
+  <<: *deploy-nacos
+  stage: deploy
+  rules:
+    - if: $CI_COMMIT_BRANCH == "release"
+      changes:
+        - "*/*/test/*.yml"
+        - "*/*/test/*.yaml"
+        - "*/*/uat/*.yml"
+        - "*/*/uat/*.yaml"
+
+deploy-prod:
+  <<: *deploy-nacos
+  stage: deploy
+  rules:
+    - if: $CI_COMMIT_BRANCH == "master"
+      changes:
+        - "*/*/prod/*.yml"
+        - "*/*/prod/*.yaml"
