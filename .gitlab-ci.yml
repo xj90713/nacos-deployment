@@ -1,0 +1,6 @@
+# Include separate configuration files
+include:
+  # add CI-specific jobs
+  - 'ci/deploy.yml'
+  - 'ci/notify.yml'
+  - 'ci/variables.yml'
